@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,10 +32,12 @@ func TestP2PRouterOptions(t *testing.T) {
 		libp2p.ListenAddrStrings("foo"),
 	}
 	announceAddrs := []netip.Addr{netip.MustParseAddr("203.0.113.10")}
+	psk := []byte("0123456789abcdef0123456789abcdef")
 	opts := []RouterOption{
 		WithLibP2POptions(libp2pOpts...),
 		WithDataDir("foobar"),
 		WithAnnounceAddrs(announceAddrs),
+		WithPrivateNetworkKey(psk),
 	}
 	cfg := RouterConfig{}
 	err := option.Apply(&cfg, opts...)
@@ -41,6 +45,7 @@ func TestP2PRouterOptions(t *testing.T) {
 	require.Equal(t, libp2pOpts, cfg.Libp2pOpts)
 	require.EqualT(t, "foobar", cfg.DataDir)
 	require.SliceEqualT(t, announceAddrs, cfg.AnnounceAddrs)
+	require.SliceEqualT(t, psk, cfg.PrivateNetworkKey)
 }
 
 func TestAnnounceMultiaddrs(t *testing.T) {
@@ -65,6 +70,27 @@ func TestAnnounceMultiaddrs(t *testing.T) {
 		actual = append(actual, addr.String())
 	}
 	require.SliceEqualT(t, expected, actual)
+}
+
+func TestLoadPrivateNetworkKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	validPath := filepath.Join(dir, "valid")
+	err := os.WriteFile(validPath, []byte("/key/swarm/psk/1.0.0/\n/base16/\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"), 0o600)
+	require.NoError(t, err)
+	psk, err := LoadPrivateNetworkKey(validPath)
+	require.NoError(t, err)
+	require.Len(t, psk, 32)
+
+	invalidPath := filepath.Join(dir, "invalid")
+	err = os.WriteFile(invalidPath, []byte("not a key"), 0o600)
+	require.NoError(t, err)
+	_, err = LoadPrivateNetworkKey(invalidPath)
+	require.Error(t, err)
+
+	_, err = LoadPrivateNetworkKey(filepath.Join(dir, "missing"))
+	require.Error(t, err)
 }
 
 func TestP2PRouter(t *testing.T) {

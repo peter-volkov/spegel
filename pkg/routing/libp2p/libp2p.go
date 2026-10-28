@@ -29,6 +29,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/core/sec"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -55,6 +56,7 @@ type RouterConfig struct {
 	DataDir           string
 	Libp2pOpts        []libp2p.Option
 	AnnounceAddrs     []netip.Addr
+	PrivateNetworkKey pnet.PSK
 	AdvertiseTTL      time.Duration
 	MaxReprovideDelay time.Duration
 }
@@ -76,6 +78,29 @@ func WithAnnounceAddrs(addrs []netip.Addr) RouterOption {
 		cfg.AnnounceAddrs = addrs
 		return nil
 	}
+}
+
+// WithPrivateNetworkKey makes the router a member of a libp2p private network, so that
+// only peers holding the same pre-shared key can connect to it.
+func WithPrivateNetworkKey(psk pnet.PSK) RouterOption {
+	return func(cfg *RouterConfig) error {
+		cfg.PrivateNetworkKey = psk
+		return nil
+	}
+}
+
+// LoadPrivateNetworkKey reads a pre-shared key in the libp2p v1 PSK file format.
+func LoadPrivateNetworkKey(path string) (pnet.PSK, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	psk, err := pnet.DecodeV1PSK(f)
+	if err != nil {
+		return nil, fmt.Errorf("could not decode private network key: %w", err)
+	}
+	return psk, nil
 }
 
 func WithDataDir(dataDir string) RouterOption {
@@ -160,6 +185,9 @@ func NewRouter(ctx context.Context, addr string, bs Bootstrapper, peerMetadata r
 			return nil, err
 		}
 		hostOpts = append(hostOpts, libp2p.Identity(peerKey))
+	}
+	if cfg.PrivateNetworkKey != nil {
+		hostOpts = append(hostOpts, libp2p.PrivateNetwork(cfg.PrivateNetworkKey))
 	}
 	hostOpts = append(hostOpts, cfg.Libp2pOpts...)
 	host, err := libp2p.New(hostOpts...)

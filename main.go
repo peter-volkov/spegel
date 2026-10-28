@@ -71,6 +71,7 @@ type RegistryCmd struct {
 	PeerTLSCertDir               string           `arg:"--peer-tls-cert-dir,env:PEER_TLS_CERT_DIR" help:"Path to directory containing the CA (ca.crt) and TLS certificate (tls.crt, tls.key) used for mutual TLS between peers."`
 	PeerTLSServerName            string           `arg:"--peer-tls-server-name,env:PEER_TLS_SERVER_NAME" default:"spegel-peer" help:"Name that peer TLS certificates are verified against, as peers are dialed by IP."`
 	AnnounceAddrs                []netip.Addr     `arg:"--announce-addrs,env:ANNOUNCE_ADDRS" help:"IPs to announce to other peers instead of the IPs of the local interfaces."`
+	PrivateNetworkKeyPath        string           `arg:"--private-network-key-path,env:PRIVATE_NETWORK_KEY_PATH" help:"Path to a libp2p pre-shared key. When set, only peers with the same key can join the router network."`
 	MirroredRegistries           []string         `arg:"--mirrored-registries,env:MIRRORED_REGISTRIES" help:"Registries that are configured to be mirrored, if slice is empty all registries are mirrored."`
 	RegistryFilters              []*regexp.Regexp `arg:"--registry-filters,env:REGISTRY_FILTERS" help:"Regular expressions to filter out tags/registries, if slice is empty all registries/tags are resolved."`
 	MirrorResolveTimeout         time.Duration    `arg:"--mirror-resolve-timeout,env:MIRROR_RESOLVE_TIMEOUT" default:"20ms" help:"Max duration spent finding a mirror."`
@@ -250,6 +251,13 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 	routerOpts := []libp2p.RouterOption{
 		libp2p.WithDataDir(args.DataDir),
 		libp2p.WithAnnounceAddrs(args.AnnounceAddrs),
+	}
+	if args.PrivateNetworkKeyPath != "" {
+		psk, err := libp2p.LoadPrivateNetworkKey(args.PrivateNetworkKeyPath)
+		if err != nil {
+			return err
+		}
+		routerOpts = append(routerOpts, libp2p.WithPrivateNetworkKey(psk))
 	}
 	router, err := libp2p.NewRouter(ctx, args.RouterAddr, bootstrapper, routing.PeerMetadata{RegistryPort: uint16(registryPort)}, routerOpts...)
 	if err != nil {
