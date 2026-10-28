@@ -44,6 +44,7 @@ func TestRegistryOptions(t *testing.T) {
 		WithResolveTimeout(10 * time.Minute),
 		WithUserinfo(url.UserPassword("foo", "bar")),
 		WithOCIClient(ociClient),
+		WithPeerScheme("https"),
 	}
 	cfg := RegistryConfig{}
 	err = option.Apply(&cfg, opts...)
@@ -53,6 +54,7 @@ func TestRegistryOptions(t *testing.T) {
 	require.EqualT(t, 10*time.Minute, cfg.ResolveTimeout)
 	require.Equal(t, ociClient, cfg.OCIClient)
 	require.EqualT(t, "foo:bar", cfg.Userinfo.String())
+	require.EqualT(t, "https", cfg.PeerScheme)
 }
 
 func TestProbeHandlers(t *testing.T) {
@@ -607,4 +609,83 @@ func TestFetchChannel(t *testing.T) {
 			testutil.RequireChannelOpen(t, fetchCh)
 		})
 	})
+}
+
+func TestPeerTLS(t *testing.T) {
+	t.Parallel()
+
+	caPool, cert := testutil.NewCA(t, "spegel-peer")
+	serverCfg, clientCfg, err := httpx.MutualTLSConfigs(caPool, cert, "spegel-peer")
+	require.NoError(t, err)
+
+	data := []byte("served over mutual TLS")
+	dgst := digest.FromBytes(data)
+	peerReg, err := NewRegistry(storetest.NewProvider([]storetest.Content{{MediaType: "dummy", Data: data}}, nil), routing.NewMemoryRouter(map[string][]routing.Peer{}, routing.Peer{}))
+	require.NoError(t, err)
+	peerSvr := httptest.NewUnstartedServer(peerReg.Handler(logr.Discard()))
+	peerSvr.TLS = serverCfg
+	peerSvr.StartTLS()
+	t.Cleanup(peerSvr.Close)
+	addrPort := netip.MustParseAddrPort(peerSvr.Listener.Addr().String())
+	peer := routing.Peer{
+		Host:      "tls",
+		Addresses: []netip.Addr{addrPort.Addr()},
+		Metadata: routing.PeerMetadata{
+			RegistryPort: addrPort.Port(),
+		},
+	}
+	router := routing.NewMemoryRouter(map[string][]routing.Peer{dgst.String(): {peer}}, routing.Peer{})
+
+	tlsOCIClient, err := oci.NewClient(oci.WithTLSConfig(clientCfg))
+	require.NoError(t, err)
+	noCertCfg := clientCfg.Clone()
+	noCertCfg.Certificates = nil
+	noCertOCIClient, err := oci.NewClient(oci.WithTLSConfig(noCertCfg))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name           string
+		opts           []RegistryOption
+		expectedStatus int
+	}{
+		{
+			name:           "fetch with client certificate",
+			opts:           []RegistryOption{WithOCIClient(tlsOCIClient), WithPeerScheme("https")},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "fetch without client certificate is refused",
+			opts:           []RegistryOption{WithOCIClient(noCertOCIClient), WithPeerScheme("https")},
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "fetch over plain HTTP is refused",
+			opts:           []RegistryOption{WithOCIClient(tlsOCIClient)},
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			reg, err := NewRegistry(storetest.NewProvider(nil, nil), router, tt.opts...)
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			target := fmt.Sprintf("http://example.com/v2/foo/bar/blobs/%s?ns=docker.io", dgst)
+			rw := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+			reg.Handler(logr.Discard()).ServeHTTP(rw, req)
+
+			resp := rw.Result()
+			defer httpx.DrainAndClose(resp.Body)
+			b, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.EqualT(t, tt.expectedStatus, resp.StatusCode)
+			if tt.expectedStatus == http.StatusOK {
+				require.SliceEqualT(t, data, b)
+			}
+		})
+	}
 }

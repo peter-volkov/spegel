@@ -36,6 +36,7 @@ const (
 type RegistryConfig struct {
 	OCIClient      *oci.Client
 	Userinfo       *url.Userinfo
+	PeerScheme     string
 	Filters        []oci.Filter
 	ResolveTimeout time.Duration
 	ResolveRetries int
@@ -71,6 +72,15 @@ func WithOCIClient(ociClient *oci.Client) RegistryOption {
 	}
 }
 
+// WithPeerScheme sets the URL scheme used when fetching from peers, overriding the scheme
+// of the original request. Set it to https when peers serve over TLS.
+func WithPeerScheme(scheme string) RegistryOption {
+	return func(cfg *RegistryConfig) error {
+		cfg.PeerScheme = scheme
+		return nil
+	}
+}
+
 func WithUserinfo(userinfo *url.Userinfo) RegistryOption {
 	return func(cfg *RegistryConfig) error {
 		cfg.Userinfo = userinfo
@@ -89,6 +99,7 @@ type Registry struct {
 	ociClient      *oci.Client
 	router         routing.Router
 	userinfo       *url.Userinfo
+	peerScheme     string
 	filters        []oci.Filter
 	resolveTimeout time.Duration
 	resolveRetries int
@@ -127,6 +138,7 @@ func NewRegistry(provider store.Provider, router routing.Router, opts ...Registr
 		filters:        cfg.Filters,
 		resolveTimeout: cfg.ResolveTimeout,
 		userinfo:       cfg.Userinfo,
+		peerScheme:     cfg.PeerScheme,
 		bufferPool:     bufferPool,
 		stats:          Statistics{},
 		hedger:         resilient.NewHedger([]float64{80, 85, 90}, 50*time.Millisecond),
@@ -408,8 +420,12 @@ func (r *Registry) raceFetch(ctx context.Context, iterator *routing.Iterator, di
 			go func() {
 				start := time.Now()
 				res, err := httpx.HappyEyeballs(fetchCtx, peer.Addresses, func(ctx context.Context, ipAddr netip.Addr) (fetchResponse, error) {
+					scheme := dist.Scheme
+					if r.peerScheme != "" {
+						scheme = r.peerScheme
+					}
 					mirror := &url.URL{
-						Scheme: dist.Scheme,
+						Scheme: scheme,
 						Host:   netip.AddrPortFrom(ipAddr, peer.Metadata.RegistryPort).String(),
 					}
 					fetchOpts := []oci.FetchOption{
