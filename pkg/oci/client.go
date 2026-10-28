@@ -49,6 +49,13 @@ func WithTLS(rootCAs *x509.CertPool, certificates []tls.Certificate) ClientOptio
 	}
 }
 
+func WithTLSConfig(tlsConfig *tls.Config) ClientOption {
+	return func(cfg *ClientConfig) error {
+		cfg.TLSClientConfig = tlsConfig
+		return nil
+	}
+}
+
 func WithDisableKeepAlives(v bool) ClientOption {
 	return func(cfg *ClientConfig) error {
 		cfg.DisableKeepAlives = v
