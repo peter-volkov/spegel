@@ -3,6 +3,7 @@ package libp2p
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -28,15 +29,42 @@ func TestP2PRouterOptions(t *testing.T) {
 	libp2pOpts := []libp2p.Option{
 		libp2p.ListenAddrStrings("foo"),
 	}
+	announceAddrs := []netip.Addr{netip.MustParseAddr("203.0.113.10")}
 	opts := []RouterOption{
 		WithLibP2POptions(libp2pOpts...),
 		WithDataDir("foobar"),
+		WithAnnounceAddrs(announceAddrs),
 	}
 	cfg := RouterConfig{}
 	err := option.Apply(&cfg, opts...)
 	require.NoError(t, err)
 	require.Equal(t, libp2pOpts, cfg.Libp2pOpts)
 	require.EqualT(t, "foobar", cfg.DataDir)
+	require.SliceEqualT(t, announceAddrs, cfg.AnnounceAddrs)
+}
+
+func TestAnnounceMultiaddrs(t *testing.T) {
+	t.Parallel()
+
+	addrs := []ma.Multiaddr{
+		ma.StringCast("/ip4/10.0.2.192/tcp/5001"),
+		ma.StringCast("/ip4/172.17.0.1/tcp/5001"),
+		ma.StringCast("/ip6/fd00::1/tcp/5001"),
+	}
+	announceAddrs := []netip.Addr{
+		netip.MustParseAddr("203.0.113.10"),
+		netip.MustParseAddr("2001:db8::10"),
+	}
+	announced := announceMultiaddrs(addrs, announceAddrs)
+	expected := []string{
+		"/ip4/203.0.113.10/tcp/5001",
+		"/ip6/2001:db8::10/tcp/5001",
+	}
+	actual := []string{}
+	for _, addr := range announced {
+		actual = append(actual, addr.String())
+	}
+	require.SliceEqualT(t, expected, actual)
 }
 
 func TestP2PRouter(t *testing.T) {

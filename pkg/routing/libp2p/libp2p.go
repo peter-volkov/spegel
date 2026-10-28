@@ -54,6 +54,7 @@ const (
 type RouterConfig struct {
 	DataDir           string
 	Libp2pOpts        []libp2p.Option
+	AnnounceAddrs     []netip.Addr
 	AdvertiseTTL      time.Duration
 	MaxReprovideDelay time.Duration
 }
@@ -63,6 +64,16 @@ type RouterOption = option.Option[RouterConfig]
 func WithLibP2POptions(opts ...libp2p.Option) RouterOption {
 	return func(cfg *RouterConfig) error {
 		cfg.Libp2pOpts = opts
+		return nil
+	}
+}
+
+// WithAnnounceAddrs announces the given IPs to other peers instead of the IPs of the
+// local interfaces. Use it when peers can only reach each other through addresses that
+// are not assigned to an interface, such as public IPs behind a provider's 1:1 NAT.
+func WithAnnounceAddrs(addrs []netip.Addr) RouterOption {
+	return func(cfg *RouterConfig) error {
+		cfg.AnnounceAddrs = addrs
 		return nil
 	}
 }
@@ -132,6 +143,9 @@ func NewRouter(ctx context.Context, addr string, bs Bootstrapper, peerMetadata r
 					continue
 				}
 				filtered = append(filtered, addr)
+			}
+			if len(cfg.AnnounceAddrs) > 0 {
+				return announceMultiaddrs(filtered, cfg.AnnounceAddrs)
 			}
 			return filtered
 		}),
@@ -517,6 +531,39 @@ func listenMultiaddrs(addr string) ([]ma.Multiaddr, error) {
 		listenAddrs = append(listenAddrs, ma.Join(ipComp.Multiaddr(), udpComp, quicComp), ma.Join(ipComp.Multiaddr(), tcpComp))
 	}
 	return listenAddrs, nil
+}
+
+// announceMultiaddrs replaces the IP of each address with each of the announce IPs of the
+// same family, keeping the transport part of the address.
+func announceMultiaddrs(addrs []ma.Multiaddr, announceAddrs []netip.Addr) []ma.Multiaddr {
+	announced := []ma.Multiaddr{}
+	for _, addr := range addrs {
+		ipComp, rest := ma.SplitFirst(addr)
+		if ipComp == nil {
+			continue
+		}
+		for _, announceAddr := range announceAddrs {
+			var proto string
+			switch {
+			case ipComp.Code() == ma.P_IP4 && announceAddr.Is4():
+				proto = "ip4"
+			case ipComp.Code() == ma.P_IP6 && announceAddr.Is6() && !announceAddr.Is4In6():
+				proto = "ip6"
+			default:
+				continue
+			}
+			comp, err := ma.NewComponent(proto, announceAddr.String())
+			if err != nil {
+				continue
+			}
+			announcedAddr := ma.Join(comp.Multiaddr(), rest)
+			if slices.ContainsFunc(announced, announcedAddr.Equal) {
+				continue
+			}
+			announced = append(announced, announcedAddr)
+		}
+	}
+	return announced
 }
 
 func protocolsFromAddrs(addrs []ma.Multiaddr) []ma.Multiaddr {

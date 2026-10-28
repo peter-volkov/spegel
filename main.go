@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -69,6 +70,7 @@ type RegistryCmd struct {
 	PeerTLSAddr                  string           `arg:"--peer-tls-addr,env:PEER_TLS_ADDR" help:"address to serve image registry to peers over mutual TLS. When set, peers fetch from each other over HTTPS on this address and the registry address is only needed by the local containerd."`
 	PeerTLSCertDir               string           `arg:"--peer-tls-cert-dir,env:PEER_TLS_CERT_DIR" help:"Path to directory containing the CA (ca.crt) and TLS certificate (tls.crt, tls.key) used for mutual TLS between peers."`
 	PeerTLSServerName            string           `arg:"--peer-tls-server-name,env:PEER_TLS_SERVER_NAME" default:"spegel-peer" help:"Name that peer TLS certificates are verified against, as peers are dialed by IP."`
+	AnnounceAddrs                []netip.Addr     `arg:"--announce-addrs,env:ANNOUNCE_ADDRS" help:"IPs to announce to other peers instead of the IPs of the local interfaces."`
 	MirroredRegistries           []string         `arg:"--mirrored-registries,env:MIRRORED_REGISTRIES" help:"Registries that are configured to be mirrored, if slice is empty all registries are mirrored."`
 	RegistryFilters              []*regexp.Regexp `arg:"--registry-filters,env:REGISTRY_FILTERS" help:"Regular expressions to filter out tags/registries, if slice is empty all registries/tags are resolved."`
 	MirrorResolveTimeout         time.Duration    `arg:"--mirror-resolve-timeout,env:MIRROR_RESOLVE_TIMEOUT" default:"20ms" help:"Max duration spent finding a mirror."`
@@ -247,6 +249,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 	}
 	routerOpts := []libp2p.RouterOption{
 		libp2p.WithDataDir(args.DataDir),
+		libp2p.WithAnnounceAddrs(args.AnnounceAddrs),
 	}
 	router, err := libp2p.NewRouter(ctx, args.RouterAddr, bootstrapper, routing.PeerMetadata{RegistryPort: uint16(registryPort)}, routerOpts...)
 	if err != nil {
