@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -65,6 +66,9 @@ type RegistryCmd struct {
 	DataDir                      string           `arg:"--data-dir,env:DATA_DIR" default:"" help:"Directory where data is persisted."`
 	RouterAddr                   string           `arg:"--router-addr,env:ROUTER_ADDR" default:":5001" help:"address to serve router."`
 	RegistryAddr                 string           `arg:"--registry-addr,env:REGISTRY_ADDR" default:":5000" help:"address to server image registry."`
+	PeerTLSAddr                  string           `arg:"--peer-tls-addr,env:PEER_TLS_ADDR" help:"address to serve image registry to peers over mutual TLS. When set, peers fetch from each other over HTTPS on this address and the registry address is only needed by the local containerd."`
+	PeerTLSCertDir               string           `arg:"--peer-tls-cert-dir,env:PEER_TLS_CERT_DIR" help:"Path to directory containing the CA (ca.crt) and TLS certificate (tls.crt, tls.key) used for mutual TLS between peers."`
+	PeerTLSServerName            string           `arg:"--peer-tls-server-name,env:PEER_TLS_SERVER_NAME" default:"spegel-peer" help:"Name that peer TLS certificates are verified against, as peers are dialed by IP."`
 	MirroredRegistries           []string         `arg:"--mirrored-registries,env:MIRRORED_REGISTRIES" help:"Registries that are configured to be mirrored, if slice is empty all registries are mirrored."`
 	RegistryFilters              []*regexp.Regexp `arg:"--registry-filters,env:REGISTRY_FILTERS" help:"Regular expressions to filter out tags/registries, if slice is empty all registries/tags are resolved."`
 	MirrorResolveTimeout         time.Duration    `arg:"--mirror-resolve-timeout,env:MIRROR_RESOLVE_TIMEOUT" default:"20ms" help:"Max duration spent finding a mirror."`
@@ -182,6 +186,23 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 	if err != nil {
 		return err
 	}
+	peerOCIClient := ociClient
+	var peerServerTLSConfig *tls.Config
+	if args.PeerTLSAddr != "" {
+		caPool, cert, err := httpx.LoadCerts(args.PeerTLSCertDir)
+		if err != nil {
+			return err
+		}
+		var peerClientTLSConfig *tls.Config
+		peerServerTLSConfig, peerClientTLSConfig, err = httpx.MutualTLSConfigs(caPool, cert, args.PeerTLSServerName)
+		if err != nil {
+			return err
+		}
+		peerOCIClient, err = oci.NewClient(oci.WithTLSConfig(peerClientTLSConfig))
+		if err != nil {
+			return err
+		}
+	}
 
 	// OCI Filters.
 	filters := []oci.Filter{}
@@ -208,7 +229,11 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 	}
 
 	// Routing and state tracking.
-	_, registryPortStr, err := net.SplitHostPort(args.RegistryAddr)
+	peerAddr := args.RegistryAddr
+	if args.PeerTLSAddr != "" {
+		peerAddr = args.PeerTLSAddr
+	}
+	_, registryPortStr, err := net.SplitHostPort(peerAddr)
 	if err != nil {
 		return err
 	}
@@ -252,15 +277,19 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 		registry.WithResolveRetries(args.MirrorResolveRetries),
 		registry.WithResolveTimeout(args.MirrorResolveTimeout),
 		registry.WithUserinfo(userinfo),
-		registry.WithOCIClient(ociClient),
+		registry.WithOCIClient(peerOCIClient),
+	}
+	if args.PeerTLSAddr != "" {
+		registryOpts = append(registryOpts, registry.WithPeerScheme("https"))
 	}
 	reg, err := registry.NewRegistry(ctrd, router, registryOpts...)
 	if err != nil {
 		return err
 	}
+	regHandler := reg.Handler(log)
 	regSrv := &http.Server{
 		Addr:    args.RegistryAddr,
-		Handler: reg.Handler(log),
+		Handler: regHandler,
 	}
 	group.Go(func(ctx context.Context) error {
 		if err := regSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -274,6 +303,31 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 		defer shutdownCancel()
 		return regSrv.Shutdown(shutdownCtx)
 	})
+	if args.PeerTLSAddr != "" {
+		// Only HTTP/1.1 is offered so that each concurrent fetch from a peer gets its own
+		// connection. With HTTP/2 all fetches would share one connection, with encryption
+		// on one core and throughput limited by flow control.
+		protocols := &http.Protocols{}
+		protocols.SetHTTP1(true)
+		peerSrv := &http.Server{
+			Addr:      args.PeerTLSAddr,
+			Handler:   regHandler,
+			TLSConfig: peerServerTLSConfig,
+			Protocols: protocols,
+		}
+		group.Go(func(ctx context.Context) error {
+			if err := peerSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		})
+		group.Go(func(ctx context.Context) error {
+			<-ctx.Done()
+			shutdownCtx, shutdownCancel := signal.NotifyContext(context.WithoutCancel(ctx), syscall.SIGINT)
+			defer shutdownCancel()
+			return peerSrv.Shutdown(shutdownCtx)
+		})
+	}
 
 	// Metrics, pprof, and debug web
 	metrics.Register()
@@ -320,7 +374,7 @@ func registryCommand(ctx context.Context, args *RegistryCmd) error {
 		return metricsSrv.Shutdown(shutdownCtx)
 	})
 
-	log.Info("running Spegel", "registry", args.RegistryAddr, "router", args.RouterAddr)
+	log.Info("running Spegel", "registry", args.RegistryAddr, "peerTLS", args.PeerTLSAddr, "router", args.RouterAddr)
 	err = group.Wait()
 	if err != nil {
 		return err
